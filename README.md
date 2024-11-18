@@ -1,14 +1,89 @@
-# Welcome to your CDK TypeScript project
+# Image resize
 
-This is a blank project for CDK development with TypeScript.
+## 이미지 리사이징 방식
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+### 원본 이미지와 썸네일(리사이징 이미지)을 각각 생성해서 저장
 
-## Useful commands
+사용자가 이미지를 생성/요청하면, 이미지를 리사이징한 후 S3에 리사이징된 이미지를 저장한다. 이후 요청은 S3에서 리사이징된 이미지를 제공한다.
 
-* `npm run build`   compile typescript to js
-* `npm run watch`   watch for changes and compile
-* `npm run test`    perform the jest unit tests
-* `npx cdk deploy`  deploy this stack to your default AWS account/region
-* `npx cdk diff`    compare deployed stack with current state
-* `npx cdk synth`   emits the synthesized CloudFormation template
+- 장점
+  - 리사이징한 이미지를 S3에 저장해 두기 때문에 동일한 이미지에 대한 후속 요청은 빠르게 반환
+- 단점
+
+  - UI 개편 등으로 필요로 하는 이미지 크기 변경 시 썸네일(리사이징 이미지) 다시 생성 해야함
+  - 리사이징 된 이미지를 S3에 저장하는 과정에서 저장 비용이 추가됨
+
+### 이미지를 요청 시 이미지 리사이징 처리
+
+사용자가 이미지를 요청하면, Lambda@Edge 함수가 CloudFront 엣지에서 트리거된다. 이 함수에서 이미지를 리사이징하고 이미지를 CloudFront의 엣지 캐시에 저장한다.
+
+- 장점
+  - 요청마다 리사이징하여 다양한 크기로 이미지를 제공할 수 있음
+- 단점
+  - Lambda@Edge 비용이 증가
+
+결론 -> 요구사항이 명확하지 않아 현재로는 이미지를 요청 시 리사이징 처리하는 방식 선택
+
+## 구현
+
+1.  이미지를 요청하면, CloudFront는 해당 이미지가 캐시에 있는지 한다.
+    - 캐시에 있는 경우 캐싱된 이미지를 반환한다.
+    - 캐시에 없는 경우 원본 이미지를 S3에서 가져온다.
+2.  캐시에 없는 경우 CloudFront는 요청을 S3로 전달하여 원본 이미지를 가져온다. 이때, `ORIGIN_RESPONSE` 이벤트에서 Lambda@Edge를 실행한다. Lambda@Edge는 원본 이미지를 요청된 크기로 리사이징한 후 CloudFront에 캐싱한다.
+
+## ETC
+
+### S3
+
+클라우드 스토리지 서비스 (Simple Storage Service)
+
+- 파일, 이미지, 문서 등(정적인 리소스)의 데이터를 저장하기 위한 공간(버킷)을 제공한다.
+- 데이터는 버킷이라고 불리는 컨테이너에 객체 형태로 저장한다.
+
+### CloudFront
+
+콘텐츠 전송 네트워크(CDN, Content Delivery Network) 서비스
+
+- 엣지 로케이션이라고 하는 데이터 센터의 전 세계 네트워크를 통해 콘텐츠를 제공한다.
+- CloudFront를 통해 서비스하는 콘텐츠를 사용자가 요청하면 지연 시간이 가장 낮은 엣지 로케이션으로 요청이 라우팅되므로 가능한 최고의 성능으로 콘텐츠가 제공된다. (사용자의 물리적 위치와 가까운 엣지(Edge) 서버가 있고, 이는 파일 복사본을 임시로 저장하는 프로세스인 캐싱을 사용)
+
+### Lambda@Edge
+
+CloudFront와 통합되어 각 엣지 로케이션에 Lambda 함수를 전역 배포할 수 있는 서비스
+
+- 콘텐츠를 요청하는 사용자가 어떤 리전에서 접근하든지 가장 가까운 엣지 위치에서 Lambda 함수가 실행되어 빠르게 응답을 제공한다.
+- Lambda@Edge는 CloudFront 이벤트가 발생할 때 트리거되며 사용자 가까운 위치에서 실행됨으로써 지연 시간을 최소화할 수 있다.
+
+- Lambda와 Lambda@Edge의 차이점
+
+  1. 코드 실행 위치
+     - AWS Lambda: 지정된 AWS 리전(데이터 센터)에서 코드를 실행한다. 예를 들어, US East 리전에서 Lambda 함수를 생성하면 해당 리전 내에서만 실행된다.
+     - Lambda@Edge: CloudFront의 전 세계 엣지 로케이션에서 코드를 실행한다. 사용자의 지리적 위치에 따라 가까운 엣지 서버에서 Lambda 함수를 실행하므로 응답 지연 시간이 감소한다.
+  2. 사용 목적
+     - AWS Lambda: 이벤트 기반 서버리스 애플리케이션, API 백엔드, 데이터 처리, 자동화 작업 등에 적합하다. 주로 데이터 센터에서 실행되어 네트워크 지연이 크게 중요하지 않은 경우에 사용된다.
+     - Lambda@Edge: CloudFront의 콘텐츠 전송 과정에서 발생하는 HTTP 요청 및 응답을 수정하거나, 맞춤형 콘텐츠를 제공하는 데 최적화되어 있다. 지리적 위치에 따른 사용자 맞춤화, A/B 테스트, 이미지 최적화 같은 엣지 컴퓨팅 용도로 주로 사용된다.
+  3. 트리거 이벤트
+     - AWS Lambda: S3, DynamoDB, API Gateway, CloudWatch 등 다양한 AWS 서비스와 연동된 이벤트를 트리거로 사용할 수 있다.
+     - Lambda@Edge: 주로 CloudFront 요청 라이프사이클 이벤트(Viewer Request, Viewer Response, Origin Request, Origin Response)에 의해서만 트리거된다. 즉, 콘텐츠 전송 네트워크 상에서의 HTTP 요청과 응답에만 적용된다.
+  4. 배포 방식과 리전 제한
+     - AWS Lambda: 모든 AWS 리전에서 사용할 수 있으며, 함수 배포와 업데이트가 빠르다.
+     - Lambda@Edge: 기본적으로 버지니아 북부 리전에서 생성된 함수만 CloudFront 엣지 로케이션에 복제되어 실행된다. 전 세계 엣지 로케이션에 배포되기 때문에 함수 배포와 업데이트에 시간이 다소 걸릴 수 있다.
+  5. 제약 사항 및 한계
+     - AWS Lambda: Lambda 함수의 메모리 및 실행 시간은 비교적 자유롭게 설정할 수 있다.
+     - Lambda@Edge: 엣지에서 실행되기 때문에 메모리와 실행 시간, 코드 크기 등의 제약이 더 크다. 현재는 128MB~3008MB 메모리와 5분의 최대 실행 시간 제한이 있다.
+
+- 이벤트 종류
+  - `Viewer Request`: 사용자가 CloudFront에 요청을 보낼 때 트리거
+  - `Origin Request`: CloudFront가 원본 서버(S3 등)로 요청을 보내기 전에 트리거
+  - `Origin Response`: 원본 서버가 CloudFront로 응답을 보낸 후 트리거
+  - `Viewer Response`: CloudFront가 사용자에게 응답을 보내기 전에 트리거
+
+### CDK(Cloud Development Kit)
+
+AWS 리소스를 코드로 정의하고 관리할 수 있게 해주는 개발 도구
+
+- 코드로 인프라를 개발
+- 명령어를 입력하거나 클릭하는게 아니라 소스를 작성하는 선언형
+- git과 같은 버전관리를 통해 인프라의 히스토리가 기록됨
+- 인프라를 코드로 작성하면서 인프라의 구조화를 가능하게 만들어 줌
+- 규모가 커질수록 인프라를 변경해서 생기는 휴먼에러를 방지해 줌
